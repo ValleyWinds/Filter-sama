@@ -188,9 +188,14 @@ class FilterSamaPlugin(MaiBotPlugin):
         name="/filter_test",
         pattern=r"^/filter_test\b",
         description="跳过 planner，把命令参数直接喂给 reply 模型生成并发送。用法: /filter_test <消息>",
+        permission="operator",
     )
     async def cmd_filter_test(self, **kwargs: Any) -> tuple[bool, str, int]:
         """把命令参数（或默认 prompt）直接注入 reply 模型，输出文字并发送。
+
+        操作员级别命令（permission="operator"）：仅 [plugin].permission 中配置的
+        操作员（platform:id，如 qq:123456789）或 command_permissions 放行规则
+        命中的用户/会话可触发，防止群内任意成员刷模型费用。
 
         kwargs 关键字段（Command 组件提供）：
         - text: 消息的纯文本（含命令本身）
