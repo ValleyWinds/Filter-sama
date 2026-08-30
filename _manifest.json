@@ -24,8 +24,7 @@
   },
   "dependencies": [],
   "capabilities": [
-    "send.text",
-    "llm.generate"
+    "send_message"
   ],
   "i18n": {
     "default_locale": "zh-CN"

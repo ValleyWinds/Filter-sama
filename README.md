@@ -106,7 +106,7 @@ AI 生成回复 → SendService 构建出站消息
 
 ## 权限 / 能力说明
 
-`_manifest.json` 中 `capabilities` 声明为 `["send.text", "llm.generate"]`（仅 `/filter_test` 命令启用时需要）：
+`_manifest.json` 中 `capabilities` 声明为 `["send_message"]`（与官方文档示例对齐；`/filter_test` 命令发送回复时使用）：
 
 - **过滤 Hook 本身零能力**：只调用 `self.ctx.logger` 写日志，不发送消息、不读数据库、不访问网络。
 - **`/filter_test` 命令**（开启后）：使用 `ctx.send.text` 发送生成的回复、`ctx.llm.generate` 调用 reply 模型、`ctx.llm.get_available_models` 校验任务名。
