@@ -1,0 +1,26 @@
+# 运行时配置：由 Runner 依据 config_model 生成，不入库
+/config.toml
+
+# Python 缓存
+__pycache__/
+*.py[cod]
+*.egg-info/
+
+# 虚拟环境
+.venv/
+venv/
+env/
+
+# 本地数据 / 日志 / 密钥
+*.log
+*.db
+*.sqlite3
+.env
+*.token
+*.cookie
+
+# 编辑器 / 系统
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db

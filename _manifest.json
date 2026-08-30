@@ -1,0 +1,30 @@
+{
+  "manifest_version": 2,
+  "id": "com.valleywinds.filter-sama",
+  "version": "1.0.0",
+  "name": "Filter-sama",
+  "description": "出站消息过滤器：当 MaiBot 的回复命中你配置的提示词时，直接拦截不发送，只在日志中留一条记录。支持多条提示词与 contains / exact / regex 三种匹配模式。",
+  "author": {
+    "name": "ValleyWinds",
+    "url": "https://github.com/ValleyWinds"
+  },
+  "license": "MIT",
+  "urls": {
+    "repository": "https://github.com/ValleyWinds/Filter-sama",
+    "homepage": "https://github.com/ValleyWinds/Filter-sama",
+    "documentation": "https://github.com/ValleyWinds/Filter-sama#readme"
+  },
+  "host_application": {
+    "min_version": "1.0.0",
+    "max_version": "1.99.99"
+  },
+  "sdk": {
+    "min_version": "2.6.0",
+    "max_version": "2.99.99"
+  },
+  "dependencies": [],
+  "capabilities": [],
+  "i18n": {
+    "default_locale": "zh-CN"
+  }
+}
