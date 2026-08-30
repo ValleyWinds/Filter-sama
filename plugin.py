@@ -13,6 +13,12 @@
 边界（不越权）：
 - 只做“拦截 + 日志”，不修改消息内容，不发送替代消息。
 - 拦截作用于所有出站消息，命中即拦，无法区分消息来源。
+
+直测命令（配置 `[command] enabled=true` 后启用）：
+- `/filter_test <消息>`：跳过 planner，把 `<消息>` 直接喂给 reply 任务模型生成并发送。
+  生成结果同样会经过 after_build_message 检查——命中拦截词即被本插件拦下，
+  因此该命令可用于联调验证整条过滤链路。
+- `/filter_test`（无参数）：回退到配置的 default_prompt 注入。
 """
 
 from __future__ import annotations
@@ -21,7 +27,7 @@ import logging
 import re
 from typing import Any, Optional
 
-from maibot_sdk import HookHandler, MaiBotPlugin
+from maibot_sdk import Command, HookHandler, MaiBotPlugin
 from maibot_sdk.types import ErrorPolicy, HookMode, HookOrder
 
 # 兼容两种加载方式：
@@ -44,12 +50,15 @@ class FilterSamaPlugin(MaiBotPlugin):
     """Filter-sama 插件主类。
 
     生命周期：
-    - on_load: 打印启动日志，预编译正则
+    - on_load: 打印启动日志，预编译正则，异步校验 reply 模型任务名
     - on_unload: 清理正则缓存，打印卸载日志
     - on_config_update: 配置热更新（scope="self"）时重编译正则
 
     HookHandler:
     - send_service.after_build_message: BLOCKING 拦截，命中提示词即 abort
+
+    Command（配置 [command] enabled=true 后启用）:
+    - /filter_test: 跳过 planner，把参数直接喂给 reply 模型生成并发送
     """
 
     config_model = FilterSamaSettings
@@ -61,13 +70,37 @@ class FilterSamaPlugin(MaiBotPlugin):
     # ── 生命周期 ───────────────────────────────────────────────────────
 
     async def on_load(self) -> None:
-        """插件加载时执行：预编译正则缓存。"""
+        """插件加载时执行：预编译正则缓存，异步校验 reply 模型任务名。"""
         self._compile_patterns()
         self.ctx.logger.info(
             f"[Filter-sama] 插件已加载: {len(self._get_keywords())} 条提示词, "
             f"模式={self._get_match_mode()}, "
-            f"大小写={'区分' if self._is_case_sensitive() else '忽略'}"
+            f"大小写={'区分' if self._is_case_sensitive() else '忽略'}, "
+            f"/filter_test 命令={'开启' if self._command_enabled() else '关闭'}"
         )
+        if self._command_enabled():
+            import asyncio
+
+            asyncio.create_task(self._warn_if_model_missing())
+
+    async def _warn_if_model_missing(self) -> None:
+        """异步校验配置的模型任务名是否存在于主程序模型配置中（失败只告警）。"""
+        try:
+            available = await self.ctx.llm.get_available_models()
+        except Exception as exc:
+            self.ctx.logger.debug(f"[Filter-sama] 查询可用模型任务名失败: {exc}")
+            return
+        if not isinstance(available, list):
+            return
+        configured = self.config.command.model
+        if configured in available:
+            self.ctx.logger.info(f"[Filter-sama] 模型任务名 {configured} 校验通过")
+        else:
+            names = ", ".join(available) or "(空)"
+            self.ctx.logger.warning(
+                f"[Filter-sama] 配置的模型任务名 {configured} 不存在！"
+                f"可用任务名: {names}。请修改 command.model"
+            )
 
     async def on_unload(self) -> None:
         """插件卸载时执行：清理正则编译缓存。"""
@@ -125,6 +158,116 @@ class FilterSamaPlugin(MaiBotPlugin):
             f"回复内容: {self._truncate(text, 200)}"
         )
         return {"action": "abort"}
+
+    # ── Command ────────────────────────────────────────────────────────
+
+    @Command(
+        name="/filter_test",
+        pattern=r"^/filter_test\b",
+        description="跳过 planner，把命令参数直接喂给 reply 模型生成并发送。用法: /filter_test <消息>",
+    )
+    async def cmd_filter_test(self, **kwargs: Any) -> tuple[bool, str, int]:
+        """把命令参数（或默认 prompt）直接注入 reply 模型，输出文字并发送。
+
+        kwargs 关键字段（Command 组件提供）：
+        - text: 消息的纯文本（含命令本身）
+        - stream_id: 当前会话 ID
+
+        返回 (success, response, intercept_message_level=2)：
+        - intercept_message_level=2 阻止该消息继续走 Maisaka/planner
+        - response 字符串仅作系统日志，实际回复由 self.ctx.send.text 发送
+        """
+        stream_id = str(kwargs.get("stream_id", ""))
+        raw_text = str(kwargs.get("text", "")).strip()
+
+        if not self._command_enabled():
+            self.ctx.logger.warning(
+                "[Filter-sama] /filter_test 命令未启用，请在配置中开启 [command] enabled"
+            )
+            return False, "命令未启用", 2
+
+        # 提取命令参数作为注入 prompt；无参数时回退默认 prompt
+        prompt = self._extract_arg(raw_text)
+        if not prompt:
+            prompt = self._command_default_prompt()
+        if not prompt:
+            self.ctx.logger.warning("[Filter-sama] 注入 prompt 为空，放弃生成")
+            return False, "prompt 为空", 2
+
+        self.ctx.logger.info(
+            f"[Filter-sama] /filter_test 注入 reply prompt: {self._truncate(prompt, 120)}"
+        )
+
+        # 调用 reply 模型池生成文字（跳过 planner）
+        text = await self._generate_reply(prompt)
+        if not text:
+            self.ctx.logger.error("[Filter-sama] reply 生成失败或返回空")
+            return False, "reply 生成失败", 2
+
+        # 发送给用户；发送结果不影响拦截（拦截由 intercept=2 保证）
+        try:
+            result = await self.ctx.send.text(text=text, stream_id=stream_id)
+            if not result:
+                self.ctx.logger.warning(
+                    "[Filter-sama] send.text 返回 False（生成结果可能被拦截提示词拦下）"
+                )
+                return True, "reply 已生成但发送返回 False（可能被拦截）", 2
+            self.ctx.logger.info(
+                f"[Filter-sama] reply 输出已发送: {self._truncate(text, 100)}"
+            )
+            return True, "reply 输出已发送", 2
+        except Exception as exc:
+            self.ctx.logger.error(f"[Filter-sama] 发送异常: {exc}")
+            return False, f"发送异常: {exc}", 2
+
+    # ── 命令辅助 ───────────────────────────────────────────────────────
+
+    def _command_enabled(self) -> bool:
+        """读取 /filter_test 命令开关（防御旧配置格式）。"""
+        try:
+            return bool(self.config.command.enabled)
+        except Exception:
+            return False
+
+    def _command_default_prompt(self) -> str:
+        """读取无参数时的默认注入 prompt。"""
+        try:
+            return str(self.config.command.default_prompt or "").strip()
+        except Exception:
+            return ""
+
+    async def _generate_reply(self, prompt: str) -> str:
+        """调用 reply 模型生成文字（防御性封装）。"""
+        try:
+            result = await self.ctx.llm.generate(
+                prompt=prompt,
+                model=self.config.command.model,
+                temperature=float(self.config.command.temperature),
+                max_tokens=int(self.config.command.max_tokens),
+            )
+        except Exception as exc:
+            self.ctx.logger.error(f"[Filter-sama] llm.generate 异常: {exc}")
+            return ""
+
+        if isinstance(result, dict):
+            return str(result.get("response") or "").strip()
+        return str(result or "").strip()
+
+    @staticmethod
+    def _extract_arg(raw_text: str) -> str:
+        """从命令文本中提取参数部分。
+
+        例如:
+        - "/filter_test 你好呀" -> "你好呀"
+        - "/filter_test"        -> ""
+        - "/filter_test  a  b"  -> "a  b"（仅去首尾空白，保留内部）
+        """
+        if not raw_text:
+            return ""
+        m = re.match(r"^/filter_test\b\s*(.*)$", raw_text, flags=re.DOTALL)
+        if not m:
+            return ""
+        return m.group(1).strip()
 
     # ── 匹配逻辑 ───────────────────────────────────────────────────────
 

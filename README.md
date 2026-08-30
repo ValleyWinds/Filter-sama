@@ -1,6 +1,6 @@
-# Filter-sama
+# 出站消息过滤器（Filter-sama）
 
-MaiBot 出站消息过滤器。当麦麦的回复命中你配置的提示词时，**直接拦截不发送**，只在日志里留一条记录。
+MaiBot 出站消息过滤器。当麦麦的回复命中你配置的提示词时，**直接拦截不发送**，只在日志里留一条记录。可选开启 `/filter_test` 命令，跳过 planner 直接把消息喂给 reply 模型，用于联调验证整条过滤链路。
 
 典型用途：模型偶尔会输出「你好，我无法给到相关内容。」这类无意义的拒答话术，与其让它发到群里，不如静默拦掉。
 
@@ -12,6 +12,7 @@ MaiBot 出站消息过滤器。当麦麦的回复命中你配置的提示词时�
 - **大小写控制**：默认忽略大小写；`regex` 模式下同样生效。
 - **热重载**：改配置即时生效，无需重启 MaiBot。
 - **可观测**：拦截事件按可配置级别写入日志，含 `message_id`、`stream_id` 和回复摘要。
+- **直测命令**（可选）：`/filter_test <消息>` 跳过 planner 直连 reply 模型，生成结果同样经过拦截检查，可验证过滤是否生效。
 
 ## 工作原理
 
@@ -42,20 +43,20 @@ AI 生成回复 → SendService 构建出站消息
            └── README.md
    ```
 2. 启动 MaiBot，Runner 会依据 `config.py` 中的 `config_model` **自动生成** `config.toml`。
-3. 在 WebUI 的插件管理里找到「Filter-sama」，确认可启用、配置可编辑。
+3. 在 WebUI 的插件管理里找到「出站消息过滤器（Filter-sama）」，确认可启用、配置可编辑。
 
 > 仓库内**不包含** `config.toml`（已在 `.gitignore` 中忽略），因为它保存的是每个安装实例的运行时值，由 Runner 生成。
 
 ## 配置项
 
-配置在 WebUI 插件管理中编辑，分两组。
+配置在 WebUI 插件管理中编辑，分三组。
 
 ### 插件设置（`[plugin]`）
 
 | 字段 | 类型 | 默认值 | 说明 |
 |---|---|---|---|
 | `enabled` | bool | `true` | 总开关。关闭后插件完全静默，所有出站消息正常发送 |
-| `config_version` | str | `1.0.0` | 配置 schema 版本，请勿手动修改（WebUI 中隐藏） |
+| `config_version` | str | `1.1.0` | 配置 schema 版本，请勿手动修改（WebUI 中隐藏） |
 
 ### 过滤规则（`[intercept]`）
 
@@ -76,15 +77,39 @@ AI 生成回复 → SendService 构建出站消息
 
 `regex` 模式下，非法正则会在日志中告警并跳过该条，不会导致插件崩溃。
 
+### 直测命令（`[command]`）
+
+| 字段 | 类型 | 默认值 | 说明 |
+|---|---|---|---|
+| `enabled` | bool | `false` | 是否启用 `/filter_test` 命令。**默认关闭**，需要时在 WebUI 开启 |
+| `model` | str | `replyer` | 调用 reply 输出使用的模型任务名（须存在于主程序 `model_config.toml` 的 `[model_task_config.*]`，加载时会校验并告警） |
+| `default_prompt` | str | `请直接输出这句话：你好，我无法给到相关内容。` | `/filter_test` 不带参数时注入的默认 prompt（默认值可直接触发拦截词，方便联调） |
+| `max_tokens` | int | `200` | 生成回复的最大 token 数 |
+| `temperature` | float | `0.7` | 生成温度 |
+
 ## 命令
 
-本插件**不提供任何命令**，也**不注册 Tool**：它是纯出站过滤器，不接收用户输入。
+`/filter_test`（需先在配置中开启 `[command] enabled`）：
+
+```
+/filter_test <消息>
+```
+
+- **跳过 planner**：命令以 `intercept_message_level=2` 返回，阻止该消息继续走 Maisaka/planner，不会让 AI 再处理一遍。
+- **直连 reply 模型**：把 `<消息>` 作为 prompt 直接喂给 `command.model`（默认 `replyer`）生成文字。
+- **生成结果同样经过过滤**：回复发出时仍会走 `after_build_message` 检查——命中拦截词就会被本插件拦下，日志里能看到拦截记录。这就是「测试」的意义。
+- 不带参数时（`/filter_test`）回退到 `default_prompt`。
+
+示例：`/filter_test 你好` → 「你好」喂给 reply 模型 → 生成回复 → 若命中拦截词则不发送，否则正常发送。
+
+> 命令开启后注意：`/filter_test` 会在群内直接触发一次模型生成，公开群请谨慎开启。
 
 ## 权限 / 能力说明
 
-`_manifest.json` 中 `capabilities` 为**空数组**：
+`_manifest.json` 中 `capabilities` 声明为 `["send.text", "llm.generate"]`（仅 `/filter_test` 命令启用时需要）：
 
-- 插件只调用 `self.ctx.logger` 写日志，**不发送消息、不读数据库、不访问网络**。
+- **过滤 Hook 本身零能力**：只调用 `self.ctx.logger` 写日志，不发送消息、不读数据库、不访问网络。
+- **`/filter_test` 命令**（开启后）：使用 `ctx.send.text` 发送生成的回复、`ctx.llm.generate` 调用 reply 模型、`ctx.llm.get_available_models` 校验任务名。
 - Hook 处理器 `error_policy=ErrorPolicy.SKIP`：即使插件内部出错，也只跳过本次拦截，绝不阻断 MaiBot 主流程。
 - 依赖：无第三方依赖，`dependencies` 为空，无需额外安装包。
 
@@ -98,10 +123,13 @@ AI 生成回复 → SendService 构建出站消息
 | `regex` 模式不生效 | 查看日志里是否有「拦截提示词不是合法正则，已跳过」告警，修正正则语法 |
 | 改了配置没生效 | 配置热重载依赖 `on_config_update`，查看日志中是否有「[Filter-sama] 配置已热更新」；必要时重启 MaiBot |
 | 想知道拦了什么 | 拦截记录按 `log_level` 写入日志，前缀 `[Filter-sama]`，含 `message_id`、`stream_id` 和回复摘要（截断 200 字） |
+| `/filter_test` 没反应 | 确认 `[command] enabled = true`；查看启动日志是否有「模型任务名 xxx 不存在」告警，用 `command.model` 改成存在的任务名 |
+| `/filter_test` 报了「reply 生成失败」 | 查看日志中 `llm.generate 异常` 的具体原因；确认模型任务名与主程序配置一致 |
+| 想确认拦截链路是否生效 | 开启 `[command] enabled` 后发 `/filter_test`（不带参数，用默认 prompt 触发拦截词），再看日志里是否有「命中过滤提示词」记录 |
 
 ## 开发 / 测试
 
-自测脚本不依赖真实 Host，用 mock ctx 注入配置，覆盖三种匹配模式、大小写、文本提取兜底、总开关、工厂函数：
+自测脚本不依赖真实 Host，用 mock ctx 注入配置，覆盖三种匹配模式、大小写、文本提取兜底、总开关、工厂函数，以及 `/filter_test` 命令的开关、参数直喂、默认 prompt 回退、发送被拦截四种情况（共 15 个用例）：
 
 ```bash
 # 方式一：SDK 在常规位置时直接跑

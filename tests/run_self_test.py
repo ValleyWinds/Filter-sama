@@ -108,11 +108,44 @@ class FakeLogger:
         self.log(logging.ERROR, msg)
 
 
+class FakeLLM:
+    """模拟 ctx.llm：记录调用，返回可配置的生成结果。"""
+
+    def __init__(self, response: str = "") -> None:
+        self.calls: list[dict[str, Any]] = []
+        self.response = response
+        self.available: list[str] = ["replyer", "planner", "utils"]
+
+    async def generate(self, **kwargs: Any) -> dict[str, str]:
+        self.calls.append(kwargs)
+        prompt = str(kwargs.get("prompt", ""))
+        return {"response": self.response or f"模拟回复:{prompt}"}
+
+    async def get_available_models(self) -> list[str]:
+        return list(self.available)
+
+
+class FakeSend:
+    """模拟 ctx.send：记录调用，返回可配置结果。"""
+
+    def __init__(self, ok: bool = True) -> None:
+        self.calls: list[dict[str, Any]] = []
+        self.ok = ok
+
+    async def text(self, **kwargs: Any) -> bool:
+        self.calls.append(kwargs)
+        return self.ok
+
+
 class FakeCtx:
     """最小可用的 ctx 替身。"""
 
-    def __init__(self) -> None:
+    def __init__(
+        self, llm: FakeLLM | None = None, send: FakeSend | None = None
+    ) -> None:
         self.logger = FakeLogger()
+        self.llm = llm or FakeLLM()
+        self.send = send or FakeSend()
 
 
 # ── 测试辅助 ───────────────────────────────────────────────────────────
@@ -310,6 +343,42 @@ def main() -> None:
     assert instance is not None, "create_plugin() 返回空"
     assert isinstance(instance, plugin_cls), "工厂函数类型不符"
     print("[PASS] create_plugin() 工厂函数")
+
+    # ── /filter_test 命令用例 ──────────────────────────────────────────
+
+    # 12. 命令未启用（默认）→ 不生成、不发送，但拦截消息（不走 planner）
+    p = make_plugin()
+    result = asyncio.run(p.cmd_filter_test(text="/filter_test 你好", stream_id="stream_h"))
+    assert result == (False, "命令未启用", 2), result
+    assert not p.ctx.llm.calls, "命令未启用时不应调用 llm"
+    print("[PASS] 命令未启用拦截")
+
+    # 13. 命令启用 + 参数 → 参数直喂 reply 模型，生成结果发送（跳过 planner）
+    p = make_plugin({"command": {"enabled": True}})
+    result = asyncio.run(p.cmd_filter_test(text="/filter_test 你好", stream_id="stream_h"))
+    assert result[0] is True and result[2] == 2, result
+    assert len(p.ctx.llm.calls) == 1, "应调用 llm.generate 一次"
+    assert p.ctx.llm.calls[0]["prompt"] == "你好", p.ctx.llm.calls
+    assert p.ctx.llm.calls[0]["model"] == "replyer", p.ctx.llm.calls
+    assert len(p.ctx.send.calls) == 1, "应发送一次"
+    assert p.ctx.send.calls[0]["text"] == "模拟回复:你好", p.ctx.send.calls
+    print("[PASS] 命令启用+参数直喂 reply")
+
+    # 14. 命令启用 + 无参数 → 回退默认 prompt
+    p = make_plugin(
+        {"command": {"enabled": True, "default_prompt": "默认注入内容"}}
+    )
+    result = asyncio.run(p.cmd_filter_test(text="/filter_test", stream_id="stream_h"))
+    assert result[0] is True and result[2] == 2, result
+    assert p.ctx.llm.calls[0]["prompt"] == "默认注入内容", p.ctx.llm.calls
+    print("[PASS] 无参数回退默认 prompt")
+
+    # 15. 生成结果被拦截（send.text 返回 False）→ 仍返回成功并提示可能被拦截
+    p = make_plugin({"command": {"enabled": True}})
+    p.ctx.send = FakeSend(ok=False)
+    result = asyncio.run(p.cmd_filter_test(text="/filter_test 你好", stream_id="stream_h"))
+    assert result[0] is True and "可能被拦截" in result[1], result
+    print("[PASS] 发送被拦截时的提示")
 
     print("\n全部用例通过 ✅")
 
