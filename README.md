@@ -127,21 +127,6 @@ AI 生成回复 → SendService 构建出站消息
 | `/filter_test` 报了「reply 生成失败」 | 查看日志中 `llm.generate 异常` 的具体原因；确认模型任务名与主程序配置一致 |
 | 想确认拦截链路是否生效 | 开启 `[command] enabled` 后发 `/filter_test`（不带参数，用默认 prompt 触发拦截词），再看日志里是否有「命中过滤提示词」记录 |
 
-## 开发 / 测试
-
-自测脚本不依赖真实 Host，用 mock ctx 注入配置，覆盖三种匹配模式、大小写、文本提取兜底、总开关、工厂函数，以及 `/filter_test` 命令的开关、参数直喂、默认 prompt 回退、发送被拦截四种情况（共 15 个用例）：
-
-```bash
-# 方式一：SDK 在常规位置时直接跑
-python plugins/filter_sama/tests/run_self_test.py
-
-# 方式二：SDK 不在常规位置，用环境变量指定
-MAIBOT_SDK_PATH="/path/to/maibot-plugin-sdk-2.7.0" \
-  python plugins/filter_sama/tests/run_self_test.py
-```
-
-脚本会**自动定位**插件根目录（相对脚本自身位置），并依次探测环境变量 `MAIBOT_SDK_PATH` → 上级目录内的 `maibot-plugin-sdk*`；找不到时给出明确指引而不是静默失败。**脚本内无任何硬编码绝对路径。**
-
 ## 许可证
 
 MIT（与 `_manifest.json` 中的 `license` 字段一致）。

@@ -1,2 +1,0 @@
-# 统一换行符为 LF，避免跨平台协作时 diff 出现整文件改动
-* text=auto eol=lf
