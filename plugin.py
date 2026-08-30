@@ -185,7 +185,7 @@ class FilterSamaPlugin(MaiBotPlugin):
     # ── Command ────────────────────────────────────────────────────────
 
     @Command(
-        name="/filter_test",
+        name="filter_test",
         pattern=r"^/filter_test\b",
         description="跳过 planner，把命令参数直接喂给 reply 模型生成并发送。用法: /filter_test <消息>",
         permission="operator",
