@@ -129,4 +129,6 @@ AI 生成回复 → SendService 构建出站消息
 
 ## 许可证
 
-MIT（与 `_manifest.json` 中的 `license` 字段一致）。
+GPL-3.0（GNU General Public License v3，与 `_manifest.json` 中的 `license` 字段一致，全文见仓库根目录 `LICENSE`）。
+
+基于本插件修改或衍生的作品，必须以 GPL-3.0 发布源码，并保留原版权声明。
