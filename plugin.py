@@ -23,6 +23,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import re
 from typing import Any, Optional
@@ -66,6 +67,7 @@ class FilterSamaPlugin(MaiBotPlugin):
     def __init__(self) -> None:
         super().__init__()
         self._compiled_patterns: list[tuple[str, "re.Pattern[str]"]] = []
+        self._validation_task: Optional["asyncio.Task[Any]"] = None
 
     # ── 生命周期 ───────────────────────────────────────────────────────
 
@@ -79,9 +81,7 @@ class FilterSamaPlugin(MaiBotPlugin):
             f"/filter_test 命令={'开启' if self._command_enabled() else '关闭'}"
         )
         if self._command_enabled():
-            import asyncio
-
-            asyncio.create_task(self._warn_if_model_missing())
+            self._validation_task = asyncio.create_task(self._warn_if_model_missing())
 
     async def _warn_if_model_missing(self) -> None:
         """异步校验配置的模型任务名是否存在于主程序模型配置中（失败只告警）。"""
@@ -103,7 +103,15 @@ class FilterSamaPlugin(MaiBotPlugin):
             )
 
     async def on_unload(self) -> None:
-        """插件卸载时执行：清理正则编译缓存。"""
+        """插件卸载时执行：取消后台校验任务，清理正则编译缓存。"""
+        if self._validation_task is not None:
+            task = self._validation_task
+            self._validation_task = None
+            task.cancel()
+            try:
+                await task
+            except (asyncio.CancelledError, Exception):
+                pass
         self._compiled_patterns.clear()
         self.ctx.logger.info("[Filter-sama] 插件已卸载")
 
