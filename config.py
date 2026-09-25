@@ -70,11 +70,15 @@ class InterceptConfig(PluginConfigBase):
     __ui_order__: ClassVar[int] = 1
 
     keywords: list[str] = Field(
-        default_factory=lambda: ["你好，我无法给到相关内容。"],
-        description="命中即拦截的提示词列表，支持多条。",
+        default_factory=lambda: [
+            "你好，我无法给到相关内容。",
+            "<thinking>",
+            "</thinking>",
+        ],
+        description="命中即拦截的提示词列表，支持多条。默认含 AI 拒答话术与思维链泄漏标记。",
         json_schema_extra={
             "label": "拦截提示词",
-            "hint": "当出站回复内容命中任一提示词时，该条消息将被拦截不发送。可配置多条，每行一条。",
+            "hint": "当出站回复内容命中任一提示词时，该条消息将被拦截不发送。可配置多条，每行一条。默认含「你好，我无法给到相关内容。」与 <thinking>/</thinking> 思维链泄漏标记。",
             "order": 1,
         },
     )

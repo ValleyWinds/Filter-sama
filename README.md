@@ -64,7 +64,7 @@ AI 生成回复 → SendService 构建出站消息
 
 | 字段 | 类型 | 默认值 | 说明 |
 |---|---|---|---|
-| `keywords` | list[str] | `["你好，我无法给到相关内容。"]` | 命中即拦截的提示词列表，支持多条 |
+| `keywords` | list[str] | `["你好，我无法给到相关内容。", "<thinking>", "</thinking>"]` | 命中即拦截的提示词列表，支持多条。默认含 AI 拒答话术与思维链泄漏标记 |
 | `match_mode` | `contains` / `exact` / `regex` | `contains` | 匹配模式 |
 | `case_sensitive` | bool | `false` | 是否区分大小写 |
 | `log_level` | `debug` / `info` / `warning` / `error` | `warning` | 拦截发生时的日志级别 |
