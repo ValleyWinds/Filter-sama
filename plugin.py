@@ -278,6 +278,10 @@ class FilterSamaPlugin(MaiBotPlugin):
             return ""
 
         if isinstance(result, dict):
+            # llm.generate 返回 {"success", "response", "reasoning", "model"}
+            if result.get("success") is False:
+                reason = result.get("reasoning") or result
+                self.ctx.logger.warning(f"[Filter-sama] llm.generate 返回失败: {reason}")
             return str(result.get("response") or "").strip()
         return str(result or "").strip()
 
@@ -392,7 +396,15 @@ class FilterSamaPlugin(MaiBotPlugin):
         return ""
 
     def _extract_text_from_components(self, raw_message: Any) -> str:
-        """从 raw_message（MessageSequence 序列化）中拼接文本组件。"""
+        """从 raw_message（MessageSequence 序列化）中拼接文本组件。
+
+        1.2.5 的序列化格式为 ``{"type": "text", "data": "<文本>"}``
+        （见 Host 端 `PluginMessageUtils._component_to_dict`）。
+
+        **必须按 type 过滤**：image / emoji / voice 的 `data` 是图片或表情地址，
+        file / at / reply / forward / dict 的 `data` 是结构化数据，都不是回复正文。
+        若不加过滤地把 `data` 当文本，图片 URL 里恰好含关键词就会误拦。
+        """
         if isinstance(raw_message, dict):
             components = raw_message.get("components")
         elif isinstance(raw_message, list):
@@ -405,15 +417,12 @@ class FilterSamaPlugin(MaiBotPlugin):
             for comp in components:
                 if not isinstance(comp, dict):
                     continue
-                # TextComponent 序列化后为 {"type": "text", "text": "..."}
-                text_val = comp.get("text") or comp.get("data")
+                if comp.get("type") != "text":
+                    continue
+                # `data` 是 1.2.x 的字段名；`text` 为兼容更早的序列化格式
+                text_val = comp.get("data") or comp.get("text")
                 if isinstance(text_val, str) and text_val.strip():
                     parts.append(text_val)
-                elif isinstance(text_val, dict):
-                    # DictComponent 自定义消息
-                    inner = text_val.get("data")
-                    if isinstance(inner, str) and inner.strip():
-                        parts.append(inner)
         return " ".join(p for p in parts if p)
 
     # ── 日志 ───────────────────────────────────────────────────────────

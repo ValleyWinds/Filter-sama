@@ -31,6 +31,8 @@ AI 生成回复 → SendService 构建出站消息
 
 ## 安装
 
+**环境要求**：MaiBot **1.2.0+** ／ Plugin SDK **2.6.0+**（`/filter_test` 的操作员鉴权依赖 Host 1.2.0 引入的 `permission="operator"`）。
+
 1. 把整个 `filter_sama/` 目录复制到 MaiBot 的 `plugins/` 目录下：
    ```
    MaiBot/
