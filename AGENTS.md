@@ -13,7 +13,7 @@
 - **配置**：`config.toml` 是首次运行按 `config.py` 自动生成的运行时产物，**不进 git**（`.gitignore` 已排除）；实机配置可能含 token，绝不提交。`[plugin].enabled` 是宿主保留键，配置模型里不要声明它。
 - **版本区间**：`host_application` 上界锁已实测的次版本线（当前 `1.3.99`）、`sdk` 上界锁 `2.99.99`，都不要写 `999.999.999`。MaiBot 出新小线后先实测再抬界，并递增插件 `version` 发新版。
 - **插件 `id` 发布后不得变更**；manifest 新增字段前先查技能的必填/禁写字段清单（manifest v2 是 `extra="forbid"`，写错字段直接拒载）。
-- **验证**：本仓库无自动化测试（曾有，后按最简结构原则移除）。改了 `plugin.py` / `config.py` 至少跑 `python -m py_compile plugin.py config.py`；行为验证用本地 MaiBot 实例热加载（部署到实例 `plugins/` 目录，WebUI 重新加载即可，无需重启）。
+- **验证**：`tests/` 用 pytest（真实 SDK + 假 RPC 通道，不需要 MaiBot 宿主）：`PYTHONPATH=<maibot-plugin-sdk 仓库根> uv run --with pytest --with pydantic python -m pytest tests -q`。改了 `plugin.py` / `config.py` 必须跑一遍。⚠️ pytest 配置在 `tests/pytest.ini`（仓库根目录名含连字符会导致 pytest 9 根包导入失败，见 `docs/architecture.md`），**不要挪回根 pyproject**。行为验证用本地 MaiBot 实例热加载（部署到实例 `plugins/` 目录，新目录或文件变化约 2~6 秒自动生效，无需重启）。
 - 文档一律简体中文。
 
 ## 发布规矩

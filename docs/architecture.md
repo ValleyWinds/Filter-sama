@@ -7,7 +7,8 @@
 - `plugin.py` — 插件入口：`FilterSamaPlugin`（声明 `config_model`）、两个 `HookHandler`（重试层 + 出站拦截层）、一个 `Command`（`/filter_test`）、三个生命周期方法、匹配 / 文本提取 / 日志辅助函数
 - `config.py` — 配置模型 `FilterSamaSettings`：`plugin`（总开关）/ `intercept`（过滤规则）/ `command`（直测命令）三节；`CONFIG_SCHEMA_VERSION` 随配置结构变更递增
 - `_manifest.json` — manifest v2：能力声明 `send.text` / `llm.generate` / `llm.get_available_models`（HookHandler 无需声明能力）
-- `__init__.py` — 包标记（空文件）
+- `__init__.py` — 包标记（重导出 `FilterSamaPlugin` / `create_plugin`；MaiBot 实际直接加载 `plugin.py`）
+- `tests/` — pytest 离线测试：真实 SDK + 假 RPC 通道（`conftest.py` 隔离加载、`test_plugin.py` 覆盖配置默认值 / 三种匹配 / 组件过滤 / 出站拦截 / 重试封顶 / 命令输出）；跑法见 `tests/test_plugin.py` 头注释。⚠️ pytest 配置在 `tests/pytest.ini`——仓库根目录名含连字符（`Filter-sama`）不是合法包名，pytest 9 会把根目录当 Package 并在 setup 时导入其 `__init__.py` 导致相对导入炸掉；把 rootdir 锚在 `tests/` 可绕开。**不要把 pytest 配置挪回根 `pyproject.toml`**（根目录改名后可移回）
 - `docs/` / `CHANGELOG.md` / `AGENTS.md` — 开发文档、用户可感知变更记录、给 AI 的仓库指令
 
 ## 数据流
@@ -43,6 +44,12 @@ WebUI 保存配置 → `on_config_update(scope="self")` → `_compile_patterns()
 - **`error_policy=ErrorPolicy.SKIP`**：两个 Hook 出错只跳过本次检查，绝不阻断 MaiBot 主流程。
 - **文本提取按组件类型过滤**：出站拦截的 `_extract_text_from_components` 只取 `type == "text"` 组件，防止把 image / emoji 的 URL 当正文导致误拦。
 - **兼容区间策略**：`host_application` 锁 `1.2.0 ~ 1.3.99`（同主次版本的更高补丁 Host 只 warning 不拒载；MaiBot 出新小线后实测再抬界），`sdk` 锁 `2.6.0 ~ 2.99.99`。不写 `999.999.999`。
+
+## 能力与权限
+
+- **capabilities 与调用一一对应**：`send.text`（`/filter_test` 发送生成结果与「[已拦截]」提示）、`llm.generate`（直测生成）、`llm.get_available_models`（加载时校验模型任务名）。两个过滤 / 重试 Hook 本身零能力，只写日志。
+- **命令鉴权**：`/filter_test` 用 `permission="operator"`，操作员清单在主程序 `bot_config.toml` 的 `[plugin].permission`（格式 `platform:id`）；额外放行走 `[plugin.command_permissions.<插件id>.filter_test]` 的 `allow_users` / `allow_chats`。
+- **`error_policy=ErrorPolicy.SKIP`**：两个 Hook 出错只跳过本次检查，绝不阻断 MaiBot 主流程。
 
 ## 给接手者（含 AI）的提示
 
