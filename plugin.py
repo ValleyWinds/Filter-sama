@@ -15,24 +15,33 @@
 
 """Filter-sama —— 出站消息过滤器，插件入口。
 
-当出站消息（AI 回复、主动发言、其他插件消息）命中用户配置的提示词时，
-在 `send_service.after_build_message` Hook 点直接中止发送，并在日志中记录。
+当出站消息（AI 回复、主动发言、其他插件消息）命中用户配置的提示词时拦截处理，
+并在日志中记录。拦截分两层：
 
-为什么选这个 Hook：
-- `send_service.after_build_message` 是出站消息构建完成的第一个控制点，
-  kwargs 含序列化 SessionMessage（`message`）、`processed_plain_text`、
-  `stream_id` 等，且该 Hook 允许 abort。
+- 第一层 `maisaka.replyer.after_response`：聊天回复刚生成、尚未发出时检查，
+  命中则回带 `retry=True` + `retry_reason` 请求 Host 重新生成。
+  Host 自带有界重试循环（`REPLYER_MAX_HOOK_RETRIES` 硬编码上限 3，写回
+  `retry_count` / `max_retries` 不会被读取），本插件按 kwargs 传入的
+  `retry_count`（已重试次数，从 0 起）与配置的 `retry_count` 比较，
+  自行决定是否继续请求重试；被拒回复不发送、不进聊天历史。
+- 第二层 `send_service.after_build_message`：重试额度用尽仍命中，以及不经
+  回复链的出站消息（主动发言、其他插件消息等）直接命中，abort 中止发送。
+
+为什么出站拦截选 `send_service.after_build_message`：
+- 它是出站消息构建完成的第一个控制点，kwargs 含序列化 SessionMessage
+  （`message`）、`processed_plain_text`、`stream_id` 等，且该 Hook 允许 abort。
 - 主程序收到 abort 后直接 `return None`，跳过 Platform IO 发送，也不写库，
   即“拦截不发送”且不留聊天历史。
 
 边界（不越权）：
-- 只做“拦截 + 日志”，不修改消息内容，不发送替代消息。
-- 拦截作用于所有出站消息，命中即拦，无法区分消息来源。
+- 不修改消息内容；出站拦截层只做“拦截 + 日志”，不发送替代消息。
+- 重试层只回带 retry 标志与约束提示，不替模型生成内容。
+- 出站拦截层作用于所有出站消息，命中即拦，无法区分消息来源。
 
 直测命令（配置 `[command] enabled=true` 后启用）：
 - `/filter_test <消息>`：跳过 planner，把 `<消息>` 直接喂给 reply 任务模型生成并发送。
   生成结果同样会经过 after_build_message 检查——命中拦截词即被本插件拦下，
-  因此该命令可用于联调验证整条过滤链路。
+  此时向会话补发一条「[已拦截]」提示，可用于联调验证整条过滤链路。
 - `/filter_test`（无参数）：回退到配置的 default_prompt 注入。
 """
 
@@ -71,7 +80,10 @@ class FilterSamaPlugin(MaiBotPlugin):
     - on_config_update: 配置热更新（scope="self"）时重编译正则
 
     HookHandler:
+    - maisaka.replyer.after_response: BLOCKING，回复命中提示词时请求重新生成
+      （受 [intercept] retry_count 约束，宿主另有硬上限 3）
     - send_service.after_build_message: BLOCKING 拦截，命中提示词即 abort
+      （重试额度用尽后的兜底，也是非回复链出站消息的唯一拦截点）
 
     Command（配置 [command] enabled=true 后启用）:
     - /filter_test: 跳过 planner，把参数直接喂给 reply 模型生成并发送
@@ -93,6 +105,7 @@ class FilterSamaPlugin(MaiBotPlugin):
             f"[Filter-sama] 插件已加载: {len(self._get_keywords())} 条提示词, "
             f"模式={self._get_match_mode()}, "
             f"大小写={'区分' if self._is_case_sensitive() else '忽略'}, "
+            f"重试={self._get_retry_count()}次, "
             f"/filter_test 命令={'开启' if self._command_enabled() else '关闭'}"
         )
         if self._command_enabled():
@@ -182,6 +195,66 @@ class FilterSamaPlugin(MaiBotPlugin):
         )
         return {"action": "abort"}
 
+    @HookHandler(
+        "maisaka.replyer.after_response",
+        name="filter_sama_retry",
+        description="回复命中过滤提示词时请求重新生成，重试额度用尽后放行交由出站拦截兜底",
+        mode=HookMode.BLOCKING,
+        order=HookOrder.EARLY,
+        error_policy=ErrorPolicy.SKIP,
+    )
+    async def retry_on_reply_response(self, **kwargs: Any) -> dict[str, Any]:
+        """回复生成后（尚未发出）执行过滤检查，命中时请求 Host 重新生成。
+
+        kwargs 关键字段（Host 传入，均为只读入参）：
+        - response: 回复正文纯文本（兼容只读投影）
+        - session_id: 会话 ID
+        - retry_count: Host 已执行的重试次数（从 0 起，每次重试 +1）
+
+        Host 的重试计数由循环局部变量控制（硬编码上限 3），写回 retry_count /
+        max_retries 不会被读取；本插件只能通过每次回带 retry=True 逐次争取重试，
+        因此以 kwargs.retry_count 与配置 [intercept].retry_count 比较来封顶。
+
+        - 命中且未达配置的重试次数 → 回带 retry=True + retry_reason 触发重新生成
+        - 命中但额度用尽 → 放行，由 send_service.after_build_message 兜底拦截
+        - 未命中 → 原样放行
+        """
+        if not self.config.plugin.enabled:
+            return {"action": "continue"}
+
+        response = kwargs.get("response")
+        text = response if isinstance(response, str) else ""
+        matched = self._match_keyword(text) if text else None
+        if matched is None:
+            return {"action": "continue"}
+
+        session_id = str(kwargs.get("session_id") or "")
+        retried = self._coerce_int(kwargs.get("retry_count"), default=0)
+        max_retry = self._get_retry_count()
+        if retried >= max_retry:
+            self._log(
+                f"[Filter-sama] 回复命中提示词「{matched}」，重试额度已用完"
+                f"（{retried}/{max_retry}），放行交由出站拦截兜底 | "
+                f"session_id={session_id or 'unknown'} | "
+                f"被拒回复: {self._truncate(text, 200)}"
+            )
+            return {"action": "continue"}
+
+        self._log(
+            f"[Filter-sama] 回复命中提示词「{matched}」，请求重新生成"
+            f"（第 {retried + 1}/{max_retry} 次）| "
+            f"session_id={session_id or 'unknown'} | "
+            f"被拒回复: {self._truncate(text, 200)}"
+        )
+        return {
+            "action": "continue",
+            "modified_kwargs": {
+                **kwargs,
+                "retry": True,
+                "retry_reason": self._get_retry_reason(),
+            },
+        }
+
     # ── Command ────────────────────────────────────────────────────────
 
     @Command(
@@ -203,7 +276,8 @@ class FilterSamaPlugin(MaiBotPlugin):
 
         返回 (success, response, intercept_message_level=2)：
         - intercept_message_level=2 阻止该消息继续走 Maisaka/planner
-        - response 字符串仅作系统日志，实际回复由 self.ctx.send.text 发送
+        - response 字符串仅作系统日志，实际回复由 self.ctx.send.text 发送；
+          生成结果命中拦截词被拦下时，向会话补发「[已拦截]」提示
         """
         stream_id = str(kwargs.get("stream_id", ""))
         raw_text = str(kwargs.get("text", "")).strip()
@@ -237,9 +311,14 @@ class FilterSamaPlugin(MaiBotPlugin):
             result = await self.ctx.send.text(text=text, stream_id=stream_id)
             if not result:
                 self.ctx.logger.warning(
-                    "[Filter-sama] send.text 返回 False（生成结果可能被拦截提示词拦下）"
+                    "[Filter-sama] send.text 返回 False（生成结果被拦截提示词拦下）"
                 )
-                return True, "reply 已生成但发送返回 False（可能被拦截）", 2
+                # 向会话补发拦截提示；该文案不含拦截词，不会被自己拦下
+                try:
+                    await self.ctx.send.text(text="[已拦截]", stream_id=stream_id)
+                except Exception as exc:
+                    self.ctx.logger.error(f"[Filter-sama] 发送拦截提示异常: {exc}")
+                return True, "[已拦截]", 2
             self.ctx.logger.info(
                 f"[Filter-sama] reply 输出已发送: {self._truncate(text, 100)}"
             )
@@ -302,6 +381,29 @@ class FilterSamaPlugin(MaiBotPlugin):
         return m.group(1).strip()
 
     # ── 匹配逻辑 ───────────────────────────────────────────────────────
+
+    def _get_retry_count(self) -> int:
+        """读取重试次数配置（防御旧配置格式），负值按 0 处理。"""
+        try:
+            value = int(self.config.intercept.retry_count)
+        except Exception:
+            return 0
+        return value if value > 0 else 0
+
+    def _get_retry_reason(self) -> str:
+        """读取重试约束提示配置；留空时 Host 重新生成不附加约束句。"""
+        try:
+            return str(self.config.intercept.retry_reason or "").strip()
+        except Exception:
+            return ""
+
+    @staticmethod
+    def _coerce_int(value: Any, default: int = 0) -> int:
+        """把 Hook kwargs 传入的数值安全转为 int，非法值回落默认。"""
+        try:
+            return int(value)
+        except (TypeError, ValueError):
+            return default
 
     def _get_keywords(self) -> list[str]:
         """读取拦截提示词列表（防御旧配置格式）。"""

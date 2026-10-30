@@ -17,7 +17,7 @@
 
 分组：
 - plugin: 插件总开关（enabled / config_version）
-- intercept: 过滤规则（提示词列表、匹配模式、大小写、日志级别）
+- intercept: 过滤规则（提示词列表、匹配模式、大小写、日志级别、重试次数与约束提示）
 - command: /filter_test 直测命令（开关、reply 模型任务名、生成参数）
 
 说明：本文件是配置结构与默认值的唯一来源（源码定义），
@@ -31,7 +31,7 @@ from typing import ClassVar, Literal
 from maibot_sdk import Field, PluginConfigBase
 
 # 配置 schema 版本；改动配置结构时递增，Runner 据此补齐新增字段
-CONFIG_SCHEMA_VERSION = "1.1.0"
+CONFIG_SCHEMA_VERSION = "1.2.0"
 
 
 class PluginSectionConfig(PluginConfigBase):
@@ -107,6 +107,25 @@ class InterceptConfig(PluginConfigBase):
             "label": "日志级别",
             "hint": "拦截发生时以该级别写入日志，便于在日志中查看拦截记录。",
             "order": 4,
+        },
+    )
+    retry_count: int = Field(
+        default=2,
+        ge=0,
+        description="回复命中提示词时请求模型重新生成的次数，0 = 不重试直接拦截。",
+        json_schema_extra={
+            "label": "重试次数",
+            "hint": "仅对聊天回复生效：命中提示词后先请求模型重新生成，多次重试仍命中则拦截不发送（静默吞消息）。宿主对重试次数有硬上限（当前为 3），配置超过时按宿主上限生效。",
+            "order": 5,
+        },
+    )
+    retry_reason: str = Field(
+        default="上一次回复未通过过滤检查，请重新生成一条不同的回复",
+        description="触发重新生成时传给模型的约束提示，会拼入下一轮的【重生成约束】。",
+        json_schema_extra={
+            "label": "重试约束提示",
+            "hint": "留空则重新生成时不附加任何约束说明。宿主会把它拼成「由于{原因}，之前生成的回复\"…\"不符合要求，你需要重新生成回复。」注入下一轮提示词。可按机器人人设自行调整措辞。",
+            "order": 6,
         },
     )
 

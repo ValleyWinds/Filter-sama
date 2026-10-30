@@ -1,37 +1,44 @@
 # 出站消息过滤器（Filter-sama）
 
-MaiBot 出站消息过滤器。当麦麦的回复命中你配置的提示词时，**直接拦截不发送**，只在日志里留一条记录。可选开启 `/filter_test` 命令，跳过 planner 直接把消息喂给 reply 模型，用于联调验证整条过滤链路。
+MaiBot 出站消息过滤器。当麦麦的回复命中你配置的提示词时，先**请求模型重新生成**（次数可配置），多次重试仍命中则**直接拦截不发送**，只在日志里留一条记录。可选开启 `/filter_test` 命令，跳过 planner 直接把消息喂给 reply 模型，用于联调验证整条过滤链路。
 
 典型用途：模型偶尔会输出「你好，我无法给到相关内容。」这类无意义的拒答话术，与其让它发到群里，不如静默拦掉。
 
 ## 功能说明
 
-- **静默拦截**：命中提示词的出站消息不会发送，也**不会写入聊天历史**。
+- **拦截重试**：聊天回复命中提示词后，先请求模型重新生成（默认 2 次，可配置），避免一刀切吞掉本可挽救的回复。
+- **静默拦截**：重试后仍命中（以及不经回复链的出站消息命中）不会被发送，也**不会写入聊天历史**。
 - **三种匹配模式**：`contains`（包含，默认）/ `exact`（全文一致）/ `regex`（正则）。
 - **多条提示词**：可配置任意数量，命中任意一条即拦截。
 - **大小写控制**：默认忽略大小写；`regex` 模式下同样生效。
 - **热重载**：改配置即时生效，无需重启 MaiBot。
-- **可观测**：拦截事件按可配置级别写入日志，含 `message_id`、`stream_id` 和回复摘要。
-- **直测命令**（可选）：`/filter_test <消息>` 跳过 planner 直连 reply 模型，生成结果同样经过拦截检查，可验证过滤是否生效。
+- **可观测**：拦截与重试事件按可配置级别写入日志，含 `session_id` / `message_id`、`stream_id` 和回复摘要。
+- **直测命令**（可选）：`/filter_test <消息>` 跳过 planner 直连 reply 模型，生成结果同样经过拦截检查（被拦时会话里会收到「[已拦截]」提示），可验证过滤是否生效。
 
 ## 工作原理
 
-插件挂在 `send_service.after_build_message` 这个 Hook 上：
+插件分两层拦截：
 
 ```
-AI 生成回复 → SendService 构建出站消息
-        ↓  after_build_message（Filter-sama 在此检查）
-   命中 → {"action": "abort"} → 跳过 Platform IO、不写库、打日志
+AI 生成回复
+   ↓  maisaka.replyer.after_response（第一层：仅聊天回复链）
+   命中且还有重试额度 → 回带 retry=True 请求重新生成（被拒回复不发送、不进聊天历史）
+   命中但额度用尽 / 不经回复链的出站消息 ↓
+SendService 构建出站消息
+   ↓  send_service.after_build_message（第二层）
+   命中 → {"action": "abort"} → 跳过 Platform IO、不写库、打日志（静默吞消息）
    未命中 → {"action": "continue"} → 正常发送
 ```
 
-选这个 Hook 的原因：它是出站链上**最早的可 abort 控制点**，且主程序收到 `abort` 后直接 `return None`，连数据库都不写，所以聊天历史里不会留下被拦截内容的残骸。
+第一层重试由主程序自带的有界重试循环执行：插件每次回带 `retry=True` 争取一次重生成，并把约束提示拼进下一轮提示词（`由于{原因}，之前生成的回复"…"不符合要求，你需要重新生成回复。`），让模型知道上一版为什么被拒。主程序对该循环有硬上限（当前为 3 次），配置的重试次数超过时按主程序上限生效。
 
-**注意**：该 Hook 覆盖**所有**出站消息（AI 回复、主动发言、其他插件发出的消息），无法区分来源。提示词配得太宽会误伤正常消息。
+第二层选 `send_service.after_build_message` 的原因：它是出站链上**最早的可 abort 控制点**，且主程序收到 `abort` 后直接 `return None`，连数据库都不写，所以聊天历史里不会留下被拦截内容的残骸。
+
+**注意**：第二层覆盖**所有**出站消息（AI 回复、主动发言、其他插件发出的消息），无法区分来源。提示词配得太宽会误伤正常消息。
 
 ## 安装
 
-**环境要求**：MaiBot **1.2.0+** ／ Plugin SDK **2.6.0+**（`/filter_test` 的操作员鉴权依赖 Host 1.2.0 引入的 `permission="operator"`）。当前版本已在 **MaiBot 1.3.1 ／ Plugin SDK 2.9.0** 上逐项核对适配。
+**环境要求**：MaiBot **1.2.0 ~ 1.3.99** ／ Plugin SDK **2.6.0+**（`/filter_test` 的操作员鉴权依赖 Host 1.2.0 引入的 `permission="operator"`；拦截重试依赖的 `maisaka.replyer.after_response` Hook 自 MaiBot 1.0.0 起可用）。
 
 1. 把整个 `filter_sama/` 目录复制到 MaiBot 的 `plugins/` 目录下：
    ```
@@ -58,7 +65,7 @@ AI 生成回复 → SendService 构建出站消息
 | 字段 | 类型 | 默认值 | 说明 |
 |---|---|---|---|
 | `enabled` | bool | `true` | 总开关。关闭后插件完全静默，所有出站消息正常发送 |
-| `config_version` | str | `1.1.0` | 配置 schema 版本，请勿手动修改（WebUI 中隐藏） |
+| `config_version` | str | `1.2.0` | 配置 schema 版本，请勿手动修改（WebUI 中隐藏） |
 
 ### 过滤规则（`[intercept]`）
 
@@ -67,7 +74,9 @@ AI 生成回复 → SendService 构建出站消息
 | `keywords` | list[str] | `["你好，我无法给到相关内容。", "<thinking>", "</thinking>"]` | 命中即拦截的提示词列表，支持多条。默认含 AI 拒答话术与思维链泄漏标记 |
 | `match_mode` | `contains` / `exact` / `regex` | `contains` | 匹配模式 |
 | `case_sensitive` | bool | `false` | 是否区分大小写 |
-| `log_level` | `debug` / `info` / `warning` / `error` | `warning` | 拦截发生时的日志级别 |
+| `log_level` | `debug` / `info` / `warning` / `error` | `warning` | 拦截与重试事件发生时的日志级别 |
+| `retry_count` | int | `2` | 聊天回复命中提示词后请求模型重新生成的次数；`0` = 不重试直接拦截。主程序对重试次数有硬上限（当前为 3），配置超过时按主程序上限生效 |
+| `retry_reason` | str | `上一次回复未通过过滤检查，请重新生成一条不同的回复` | 触发重新生成时传给模型的约束提示，会拼成「由于{原因}，之前生成的回复"…"不符合要求，你需要重新生成回复。」注入下一轮提示词。可按机器人人设调整措辞；留空则重新生成时不附加约束说明 |
 
 三种模式的行为差异：
 
@@ -100,7 +109,7 @@ AI 生成回复 → SendService 构建出站消息
 - **跳过 planner**：命令以 `intercept_message_level=2` 返回，阻止该消息继续走 Maisaka/planner，不会让 AI 再处理一遍。
 - **操作员级别**：`permission="operator"`，只有 `[plugin].permission` 中配置的操作员（`platform:id`，如 `qq:123456789`）或 `command_permissions` 放行规则（`allow_users` / `allow_chats`）命中的用户/会话能触发，防止群内任意成员刷模型费用。1.2.0 起支持。
 - **直连 reply 模型**：把 `<消息>` 作为 prompt 直接喂给 `command.model`（默认 `replyer`）生成文字。
-- **生成结果同样经过过滤**：回复发出时仍会走 `after_build_message` 检查——命中拦截词就会被本插件拦下，日志里能看到拦截记录。这就是「测试」的意义。
+- **生成结果同样经过过滤**：回复发出时仍会走 `after_build_message` 检查——命中拦截词就会被本插件拦下，且会话里会收到一条「[已拦截]」提示，日志里能看到拦截记录。这就是「测试」的意义。
 - 不带参数时（`/filter_test`）回退到 `default_prompt`。
 
 示例：`/filter_test 你好` → 「你好」喂给 reply 模型 → 生成回复 → 若命中拦截词则不发送，否则正常发送。
@@ -111,7 +120,7 @@ AI 生成回复 → SendService 构建出站消息
 
 `_manifest.json` 中 `capabilities` 声明为 `["send.text", "llm.generate", "llm.get_available_models"]`（与 SDK 能力注册表一致；`/filter_test` 命令开启后使用）：
 
-- **过滤 Hook 本身零能力**：只调用 `self.ctx.logger` 写日志，不发送消息、不读数据库、不访问网络。
+- **过滤 / 重试 Hook 本身零能力**：只调用 `self.ctx.logger` 写日志，不发送消息、不读数据库、不访问网络（重试是通过 Hook 返回值请求主程序重新生成，不产生额外的能力调用）。
 - **`/filter_test` 命令**（开启后）：`send.text` 发送生成的回复、`llm.generate` 调用 reply 模型、`llm.get_available_models` 校验任务名——三个能力与代码调用一一对应。
 - Hook 处理器 `error_policy=ErrorPolicy.SKIP`：即使插件内部出错，也只跳过本次拦截，绝不阻断 MaiBot 主流程。
 - 依赖：无第三方依赖，`dependencies` 为空，无需额外安装包。
@@ -128,7 +137,9 @@ AI 生成回复 → SendService 构建出站消息
 | 想知道拦了什么 | 拦截记录按 `log_level` 写入日志，前缀 `[Filter-sama]`，含 `message_id`、`stream_id` 和回复摘要（截断 200 字） |
 | `/filter_test` 没反应 | 确认 `[command] enabled = true`；确认你的账号在 `[plugin].permission` 操作员列表里（或命中 `command_permissions` 放行规则）；查看启动日志是否有「模型任务名 xxx 不存在」告警，用 `command.model` 改成存在的任务名 |
 | `/filter_test` 报了「reply 生成失败」 | 查看日志中 `llm.generate 异常` 的具体原因；确认模型任务名与主程序配置一致 |
-| 想确认拦截链路是否生效 | 开启 `[command] enabled` 后发 `/filter_test`（不带参数，用默认 prompt 触发拦截词），再看日志里是否有「命中过滤提示词」记录 |
+| 想确认拦截链路是否生效 | 开启 `[command] enabled` 后发 `/filter_test`（不带参数，用默认 prompt 触发拦截词），会话里应收到「[已拦截]」，日志里应有「命中过滤提示词」记录 |
+| 命中拦截词后没有重试，直接被吞 | 确认 `[intercept] retry_count` 不为 0；重试仅作用于聊天回复链，主动发言等不经回复链的出站消息没有重试、直接走拦截；另外主程序对重试次数有硬上限（当前为 3） |
+| 想确认重试发生了 | 插件日志按 `log_level` 写「请求重新生成（第 x/y 次）」，主程序日志中会出现「Maisaka 回复器触发重生成」记录 |
 
 ## 许可证
 
