@@ -28,3 +28,7 @@ Thumbs.db
 # ZCode 本地工具与环境痕迹
 .zcode/
 .zcodeignore
+# pytest
+.pytest_cache/
+# uv 本地运行产物
+uv.lock
