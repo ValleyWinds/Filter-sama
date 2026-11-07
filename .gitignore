@@ -32,3 +32,5 @@ Thumbs.db
 .pytest_cache/
 # uv 本地运行产物
 uv.lock
+# 本地草稿 / 产物
+Temp/
